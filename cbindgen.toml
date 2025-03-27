@@ -1,3 +1,4 @@
-language = "C"
+language = "C++"
 include_guard = "SIMPLE_BYTEBUF_H"
 pragma_once = true
+include_version = true
