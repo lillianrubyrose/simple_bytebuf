@@ -17,6 +17,14 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
+#[derive(Debug)]
+pub enum ByteBufError {
+    Success = 0,
+    OutOfBounds,
+    NullPointer,
+    InvalidLength,
+}
+
 pub struct ByteBuf {
     inner: Vec<u8>,
 
@@ -41,79 +49,82 @@ impl ByteBuf {
         }
     }
 
-    pub fn read_exact<const N: usize>(&mut self) -> [u8; N] {
+    pub fn read_exact<const N: usize>(&mut self) -> Result<[u8; N], ByteBufError> {
+        let available = self.inner.len().saturating_sub(self.rp);
+
+        if available < N {
+            return Err(ByteBufError::OutOfBounds);
+        }
+
         let mut arr = [0u8; N];
 
-        // SAFETY - This is not safe.
-        // If the caller misbehaves, it's cooked.
+        // SAFETY - Bounds checking
         unsafe {
-            ptr::copy_nonoverlapping(
-                self.inner.as_ptr().byte_add(self.rp),
-                arr.as_mut_ptr(),
-                arr.len(),
-            );
+            ptr::copy_nonoverlapping(self.inner.as_ptr().add(self.rp), arr.as_mut_ptr(), N);
         }
 
         self.rp += N;
 
-        arr
+        Ok(arr)
     }
 
     pub fn write_slice(&mut self, slice: &[u8]) {
-        if self.wp >= self.inner.len() {
-            self.inner.reserve(slice.len() * 2);
+        let adj_len = self.wp + slice.len();
+        if adj_len > self.inner.len() {
+            self.inner.reserve(slice.len());
+            self.inner.resize(adj_len, 0);
         }
 
         // SAFETY - We ensure there's enough space in the Vec
         unsafe {
             ptr::copy_nonoverlapping(
                 slice.as_ptr(),
-                self.inner.as_mut_ptr().byte_add(self.wp),
+                self.inner.as_mut_ptr().add(self.wp),
                 slice.len(),
             );
         }
 
-        self.wp += slice.len();
+        self.wp = adj_len;
     }
 
-    pub fn read_u8(&mut self) -> u8 {
-        self.read_exact::<1>()[0]
+    pub fn read_u8(&mut self) -> Result<u8, ByteBufError> {
+        Ok(self.read_exact::<1>()?[0])
     }
 
-    pub fn read_u16(&mut self) -> u16 {
-        u16::from_ne_bytes(self.read_exact::<2>())
+    pub fn read_u16(&mut self) -> Result<u16, ByteBufError> {
+        Ok(u16::from_ne_bytes(self.read_exact::<2>()?))
     }
 
-    pub fn read_u32(&mut self) -> u32 {
-        u32::from_ne_bytes(self.read_exact::<4>())
+    pub fn read_u32(&mut self) -> Result<u32, ByteBufError> {
+        Ok(u32::from_ne_bytes(self.read_exact::<4>()?))
     }
 
-    pub fn read_u64(&mut self) -> u64 {
-        u64::from_ne_bytes(self.read_exact::<8>())
+    pub fn read_u64(&mut self) -> Result<u64, ByteBufError> {
+        Ok(u64::from_ne_bytes(self.read_exact::<8>()?))
     }
 
-    pub fn read_i8(&mut self) -> i8 {
-        self.read_exact::<1>()[0] as i8
+    pub fn read_i8(&mut self) -> Result<i8, ByteBufError> {
+        Ok(self.read_exact::<1>()?[0] as i8)
     }
 
-    pub fn read_i16(&mut self) -> i16 {
-        i16::from_ne_bytes(self.read_exact::<2>())
+    pub fn read_i16(&mut self) -> Result<i16, ByteBufError> {
+        Ok(i16::from_ne_bytes(self.read_exact::<2>()?))
     }
 
-    pub fn read_i32(&mut self) -> i32 {
-        i32::from_ne_bytes(self.read_exact::<4>())
+    pub fn read_i32(&mut self) -> Result<i32, ByteBufError> {
+        Ok(i32::from_ne_bytes(self.read_exact::<4>()?))
     }
 
-    pub fn read_i64(&mut self) -> i64 {
-        i64::from_ne_bytes(self.read_exact::<8>())
+    pub fn read_i64(&mut self) -> Result<i64, ByteBufError> {
+        Ok(i64::from_ne_bytes(self.read_exact::<8>()?))
     }
 
-    pub fn read_f32(&mut self) -> f32 {
-        f32::from_ne_bytes(self.read_exact::<4>())
+    pub fn read_f32(&mut self) -> Result<f32, ByteBufError> {
+        Ok(f32::from_ne_bytes(self.read_exact::<4>()?))
     }
 
-    pub fn read_f64(&mut self) -> f64 {
-        f64::from_ne_bytes(self.read_exact::<8>())
+    pub fn read_f64(&mut self) -> Result<f64, ByteBufError> {
+        Ok(f64::from_ne_bytes(self.read_exact::<8>()?))
     }
 
     pub fn write_u8(&mut self, val: u8) {
@@ -193,120 +204,200 @@ pub unsafe extern "C" fn bytebuf_destroy(buf: *mut ByteBuf) {
 ///
 /// We trust the caller to provide a valid buffer pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bytebuf_read_u8(buf: *mut ByteBuf) -> u8 {
+pub unsafe extern "C" fn bytebuf_read_u8(buf: *mut ByteBuf, out: *mut u8) -> u8 {
     if buf.is_null() {
-        return 0;
+        return ByteBufError::NullPointer as u8;
     }
 
-    unsafe { (*buf).read_u8() }
+    unsafe {
+        match (*buf).read_u8() {
+            Ok(value) => {
+                *out = value;
+                ByteBufError::Success as u8
+            }
+            Err(err) => err as u8,
+        }
+    }
 }
 
 /// # Safety
 ///
 /// We trust the caller to provide a valid buffer pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bytebuf_read_u16(buf: *mut ByteBuf) -> u16 {
+pub unsafe extern "C" fn bytebuf_read_u16(buf: *mut ByteBuf, out: *mut u16) -> u8 {
     if buf.is_null() {
-        return 0;
+        return ByteBufError::NullPointer as u8;
     }
 
-    unsafe { (*buf).read_u16() }
+    unsafe {
+        match (*buf).read_u16() {
+            Ok(value) => {
+                *out = value;
+                ByteBufError::Success as u8
+            }
+            Err(err) => err as u8,
+        }
+    }
 }
 
 /// # Safety
 ///
 /// We trust the caller to provide a valid buffer pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bytebuf_read_u32(buf: *mut ByteBuf) -> u32 {
+pub unsafe extern "C" fn bytebuf_read_u32(buf: *mut ByteBuf, out: *mut u32) -> u8 {
     if buf.is_null() {
-        return 0;
+        return ByteBufError::NullPointer as u8;
     }
 
-    unsafe { (*buf).read_u32() }
+    unsafe {
+        match (*buf).read_u32() {
+            Ok(value) => {
+                *out = value;
+                ByteBufError::Success as u8
+            }
+            Err(err) => err as u8,
+        }
+    }
 }
 
 /// # Safety
 ///
 /// We trust the caller to provide a valid buffer pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bytebuf_read_u64(buf: *mut ByteBuf) -> u64 {
+pub unsafe extern "C" fn bytebuf_read_u64(buf: *mut ByteBuf, out: *mut u64) -> u8 {
     if buf.is_null() {
-        return 0;
+        return ByteBufError::NullPointer as u8;
     }
 
-    unsafe { (*buf).read_u64() }
+    unsafe {
+        match (*buf).read_u64() {
+            Ok(value) => {
+                *out = value;
+                ByteBufError::Success as u8
+            }
+            Err(err) => err as u8,
+        }
+    }
 }
 
 /// # Safety
 ///
 /// We trust the caller to provide a valid buffer pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bytebuf_read_i8(buf: *mut ByteBuf) -> i8 {
+pub unsafe extern "C" fn bytebuf_read_i8(buf: *mut ByteBuf, out: *mut i8) -> u8 {
     if buf.is_null() {
-        return 0;
+        return ByteBufError::NullPointer as u8;
     }
 
-    unsafe { (*buf).read_i8() }
+    unsafe {
+        match (*buf).read_i8() {
+            Ok(value) => {
+                *out = value;
+                ByteBufError::Success as u8
+            }
+            Err(err) => err as u8,
+        }
+    }
 }
 
 /// # Safety
 ///
 /// We trust the caller to provide a valid buffer pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bytebuf_read_i16(buf: *mut ByteBuf) -> i16 {
+pub unsafe extern "C" fn bytebuf_read_i16(buf: *mut ByteBuf, out: *mut i16) -> u8 {
     if buf.is_null() {
-        return 0;
+        return ByteBufError::NullPointer as u8;
     }
 
-    unsafe { (*buf).read_i16() }
+    unsafe {
+        match (*buf).read_i16() {
+            Ok(value) => {
+                *out = value;
+                ByteBufError::Success as u8
+            }
+            Err(err) => err as u8,
+        }
+    }
 }
 
 /// # Safety
 ///
 /// We trust the caller to provide a valid buffer pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bytebuf_read_i32(buf: *mut ByteBuf) -> i32 {
+pub unsafe extern "C" fn bytebuf_read_i32(buf: *mut ByteBuf, out: *mut i32) -> u8 {
     if buf.is_null() {
-        return 0;
+        return ByteBufError::NullPointer as u8;
     }
 
-    unsafe { (*buf).read_i32() }
+    unsafe {
+        match (*buf).read_i32() {
+            Ok(value) => {
+                *out = value;
+                ByteBufError::Success as u8
+            }
+            Err(err) => err as u8,
+        }
+    }
 }
 
 /// # Safety
 ///
 /// We trust the caller to provide a valid buffer pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bytebuf_read_i64(buf: *mut ByteBuf) -> i64 {
+pub unsafe extern "C" fn bytebuf_read_i64(buf: *mut ByteBuf, out: *mut i64) -> u8 {
     if buf.is_null() {
-        return 0;
+        return ByteBufError::NullPointer as u8;
     }
 
-    unsafe { (*buf).read_i64() }
+    unsafe {
+        match (*buf).read_i64() {
+            Ok(value) => {
+                *out = value;
+                ByteBufError::Success as u8
+            }
+            Err(err) => err as u8,
+        }
+    }
 }
 
 /// # Safety
 ///
 /// We trust the caller to provide a valid buffer pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bytebuf_read_f32(buf: *mut ByteBuf) -> f32 {
+pub unsafe extern "C" fn bytebuf_read_f32(buf: *mut ByteBuf, out: *mut f32) -> u8 {
     if buf.is_null() {
-        return 0.0;
+        return ByteBufError::NullPointer as u8;
     }
 
-    unsafe { (*buf).read_f32() }
+    unsafe {
+        match (*buf).read_f32() {
+            Ok(value) => {
+                *out = value;
+                ByteBufError::Success as u8
+            }
+            Err(err) => err as u8,
+        }
+    }
 }
 
 /// # Safety
 ///
 /// We trust the caller to provide a valid buffer pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bytebuf_read_f64(buf: *mut ByteBuf) -> f64 {
+pub unsafe extern "C" fn bytebuf_read_f64(buf: *mut ByteBuf, out: *mut f64) -> u8 {
     if buf.is_null() {
-        return 0.0;
+        return ByteBufError::NullPointer as u8;
     }
 
-    unsafe { (*buf).read_f64() }
+    unsafe {
+        match (*buf).read_f64() {
+            Ok(value) => {
+                *out = value;
+                ByteBufError::Success as u8
+            }
+            Err(err) => err as u8,
+        }
+    }
 }
 
 /// # Safety
@@ -489,13 +580,13 @@ mod tests {
                 let mut buffer = ByteBuf::with_capacity(5); // Arbitrary number
                 buffer.$write($ty::default());
 
-                assert_eq!(buffer.$read(), $ty::default());
+                assert_eq!(buffer.$read().unwrap(), $ty::default());
 
                 buffer.$write($ty::MAX);
                 buffer.$write($ty::MIN);
 
-                assert_eq!(buffer.$read(), $ty::MAX);
-                assert_eq!(buffer.$read(), $ty::MIN);
+                assert_eq!(buffer.$read().unwrap(), $ty::MAX);
+                assert_eq!(buffer.$read().unwrap(), $ty::MIN);
             }
         };
     }
